@@ -26,7 +26,7 @@ class ObsGains:
     error into the velocity estimates (a simple Luenberger-like structure). The separate L_nu_*
     fields are retained for clarity and future tuning.
     """
-    L_eta: float = 1.0    # position correction gain
+    L_eta: float = 2.0    # position correction gain
     L_nu_xy: float = 0.8  # vel gains for x,y
     L_nu_psi: float = 0.8 # vel gain for yaw
 

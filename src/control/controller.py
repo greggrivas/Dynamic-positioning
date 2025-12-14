@@ -54,15 +54,15 @@ class PIDGains:
         Symmetric scalar saturation limit applied component-wise to each tau output.
         Typical value must be chosen according to thruster capacity (N or Nm).
     """
-    Kp_x: float = 5_000.0  # Proportional gain for surge
-    Kp_y: float = 5_000.0  # Proportional gain for sway
-    Kp_psi: float = 2_000.0  # Proportional gain for yaw
-    Kd_x: float = 10_000.0  # Derivative gain for surge
-    Kd_y: float = 10_000.0  # Derivative gain for sway
-    Kd_psi: float = 5_000.0  # Derivative gain for yaw
-    Ki_x: float = 0.0  # Integral gain for surge
-    Ki_y: float = 0.0  # Integral gain for sway
-    Ki_psi: float = 0.0  # Integral gain for yaw
+    Kp_x: float = 15_000.0  # Proportional gain for surge
+    Kp_y: float = 15_000.0  # Proportional gain for sway
+    Kp_psi: float = 8_000.0  # Proportional gain for yaw
+    Kd_x: float = 25_000.0  # Derivative gain for surge
+    Kd_y: float = 25_000.0  # Derivative gain for sway
+    Kd_psi: float = 12_000.0  # Derivative gain for yaw
+    Ki_x: float = 500.0  # Integral gain for surge
+    Ki_y: float = 500.0  # Integral gain for sway
+    Ki_psi: float = 200.0  # Integral gain for yaw
     tau_max: float = 80_000.0  # generic scalar saturation (apply to each tau component)
 
 

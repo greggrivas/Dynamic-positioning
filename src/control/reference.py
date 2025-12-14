@@ -39,17 +39,17 @@ def sat(val, vmin, vmax):
 
 @dataclass
 class PosRefParams:
-    omega: float = 0.2      # ω_r,p
-    zeta: float  = 1.0      # ζ_r,p
+    omega: float = 0.1      # ω_r,p
+    zeta: float  = 1.2      # ζ_r,p
     Ki: float    = 0.05     # integral gain for xi_p
-    vmax: float  = 0.5      # m/s cap
+    vmax: float  = 0.3      # m/s cap
 
 @dataclass
 class HeadRefParams:
-    omega: float = 0.4
-    zeta: float  = 1.0
+    omega: float = 0.2
+    zeta: float  = 1.2
     Ki: float    = 0.2
-    rmax: float  = 0.4      # rad/s cap
+    rmax: float  = 0.2      # rad/s cap
 
 class ReferenceFilter:
     """

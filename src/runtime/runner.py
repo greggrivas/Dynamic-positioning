@@ -1,9 +1,9 @@
 # runtime/runner.py
 import math
-import numpy as np
+import random
+from typing import Tuple
 import agx
-import agxRender
-from agxPythonModules.utils.environment import simulation, application, root
+from agxPythonModules.utils.environment import simulation, application
 from agxPythonModules.utils.callbacks import StepEventCallback as Sec
 
 from agx_wrap.world import create_ocean
@@ -15,143 +15,178 @@ from control.allocation import TwoThrusterAllocator, Geometry2Thrusters
 from runtime.config import vessel as VCFG, scene as SCFG, route as RCFG, gnss as NCFG
 
 
-def _angle_of_line(x0, y0, x1, y1):
-    return math.atan2((y1 - y0), (x1 - x0))
+def _angle_of_line(x0: float, y0: float, x1: float, y1: float) -> float:
+    return math.atan2(y1 - y0, x1 - x0)
 
-def _wrap_pi(a):
-    while a > math.pi:  a -= 2*math.pi
-    while a < -math.pi: a += 2*math.pi
+def _wrap_pi(a: float) -> float:
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
     return a
 
-def _world_to_body(psi, vx, vy):
+def _world_to_body(psi: float, vx: float, vy: float) -> Tuple[float, float]:
     c, s = math.cos(psi), math.sin(psi)
-    # body u =  c*vx + s*vy, body v = -s*vx + c*vy
-    return c*vx + s*vy, -s*vx + c*vy
-
-def _body_to_world(psi, u, v):
-    c, s = math.cos(psi), math.sin(psi)
-    return c*u - s*v, s*u + c*v
+    # body: u =  c*vx + s*vy, v = -s*vx + c*vy
+    return c * vx + s * vy, -s * vx + c * vy
 
 
 def build_scene_and_start():
-    # 1) World water with sinus waves (Hydrodynamics registered)
+    # 1) Ocean with sinus waves (Hydrodynamics registered inside)
     create_ocean(height=SCFG.wave_height)
 
     # 2) Vessel with two stern thrusters
     ship = TwoThrusterVessel(
         mass_kg=VCFG.mass,
-        half_length=10.0,
-        half_width=3.75,
-        half_height=0.9,
-        cm_shift_x=-0.2,
-        thruster_z_offset=-(0.9 + 2*0.99),  # below hull bottom
-        stern_x_offset=-10.0
+        half_length=VCFG.half_length,
+        half_width=VCFG.half_width,
+        half_height=VCFG.half_height,
+        cm_shift_x=VCFG.cm_shift_x,
+        thruster_z_offset=VCFG.thruster_z_offset,
+        stern_x_offset=VCFG.stern_x_offset
     )
     ship.setPosition(agx.Vec3(RCFG.start_xy[0], RCFG.start_xy[1], 2.0))
     simulation().add(ship)
 
     # 3) DP Stack
-    # Reference
+    # Reference (2nd-order pos filter along the path + heading filter)
     ref = ReferenceFilter(
-        pos_params=PosRefParams(omega=0.25, zeta=1.0, Ki=0.08, vmax=0.8),
-        head_params=HeadRefParams(omega=0.5, zeta=1.0, Ki=0.2, rmax=0.5)
+        pos_params=PosRefParams(
+            omega=SCFG.ref_pos_wn, zeta=SCFG.ref_pos_zeta,
+            Ki=SCFG.ref_pos_Ki, vmax=SCFG.ref_pos_vmax
+        ),
+        head_params=HeadRefParams(
+            omega=SCFG.ref_head_wn, zeta=SCFG.ref_head_zeta,
+            Ki=SCFG.ref_head_Ki, rmax=SCFG.ref_head_rmax
+        )
     )
     ref.reset(psi_now=ship.get_xy_psi()[2])
 
     # Observer
-    obs = SimpleObserver(ObsGains(L_eta=1.0, L_nu_xy=0.8, L_nu_psi=0.8))
+    obs = SimpleObserver(ObsGains(
+        L_eta=getattr(SCFG, "obs_L_eta", 1.0),
+        L_nu_xy=getattr(SCFG, "obs_L_nu_xy", 1.0),
+        L_nu_psi=getattr(SCFG, "obs_L_nu_psi", 1.0)
+    ))
     x0, y0, psi0 = ship.get_xy_psi()
     obs.reset(x0, y0, psi0)
 
     # Controller M (m, m, Iz), D (Xu, Yv, Nr) 3-DOF scope. :contentReference[oaicite:5]{index=5}
     M = [VCFG.mass, VCFG.mass, VCFG.Iz]
     D = [VCFG.Xu,   VCFG.Yv,   VCFG.Nr]
-    ctl = PIDFFController(M_diag=M, D_diag=D, gains=PIDGains(
-        Kp_x=6e3, Kp_y=6e3, Kp_psi=3e3, Kd_x=12e3, Kd_y=12e3, Kd_psi=6e3, Ki_x=0.0, Ki_y=0.0, Ki_psi=0.0, tau_max=80_000.0
-    ))
+    ctl = PIDFFController(
+        M_diag=M, D_diag=D,
+        gains=PIDGains(
+            Kp_x=getattr(SCFG, "kp_x", SCFG.kp_x if hasattr(SCFG, "kp_x") else 15000.0),
+            Kd_x=getattr(SCFG, "kd_x", SCFG.kd_x if hasattr(SCFG, "kd_x") else 25000.0),
+            Ki_x=getattr(SCFG, "ki_x", SCFG.ki_x if hasattr(SCFG, "ki_x") else 500.0),
+            Kp_y=getattr(SCFG, "kp_y", SCFG.kp_y if hasattr(SCFG, "kp_y") else 15000.0),
+            Kd_y=getattr(SCFG, "kd_y", SCFG.kd_y if hasattr(SCFG, "kd_y") else 25000.0),
+            Ki_y=getattr(SCFG, "ki_y", SCFG.ki_y if hasattr(SCFG, "ki_y") else 500.0),
+            Kp_psi=getattr(SCFG, "kp_psi", SCFG.kp_psi if hasattr(SCFG, "kp_psi") else 8000.0),
+            Kd_psi=getattr(SCFG, "kd_psi", SCFG.kd_psi if hasattr(SCFG, "kd_psi") else 12000.0),
+            Ki_psi=getattr(SCFG, "ki_psi", SCFG.ki_psi if hasattr(SCFG, "ki_psi") else 200.0),
+            tau_max=getattr(SCFG, "tau_max", 100000.0)
+        )
+    )
+
 
     # Allocator geometry (thruster frames wrt CoM, using the same local pts as vessel)
     geom = Geometry2Thrusters(
-        lx1=-10.0, ly1=+2.0,   # port
-        lx2=-10.0, ly2=-2.0,   # starboard
-        biasFy=0.0
+        lx1=VCFG.thr_port_x,  ly1=VCFG.thr_port_y,
+        lx2=VCFG.thr_star_x,  ly2=VCFG.thr_star_y,
+        biasFy=VCFG.alloc_bias_Fy
     )
-    alloc = TwoThrusterAllocator(geom, Tmax=60_000.0)
+    alloc = TwoThrusterAllocator(geom, Tmax=VCFG.Tmax_thruster)
 
     # Line geometry & goal distance
     xA, yA = RCFG.start_xy
     xB, yB = RCFG.goal_xy
-    phi = _angle_of_line(xA, yA, xB, yB)        # direction of travel (world)
-    dist_goal = math.hypot(xB - xA, yB - yA)    # meters
-
+    phi    = _angle_of_line(xA, yA, xB, yB)       # travel direction (world)
+    L_path = math.hypot(xB - xA, yB - yA)         # meters
+    
+    
     # Text overlays
     sd = application().getSceneDecorator()
-    sd.setText(1, "DP Reference: dist -> goal")
-    sd.setText(2, "Thrusts [Fx1,Fy1,Fx2,Fy2] (kN)")
-    sd.setText(3, "tau [X,Y,N] (kN, kN, kNm/1000)")
+    sd.setText(1, "DP: progress & remaining to goal")
+    sd.setText(2, "Thrusters [Fx1,Fy1,Fx2,Fy2] (kN)")
+    sd.setText(3, "Commanded τ [X,Y,N] (kN, kN, kNm/1000)")
+
+    mode = {"state": "TRANSIT"}  # switch to HOLD at goal
+    goal_tol = getattr(SCFG, "goal_tol", 1.0)
 
     # 4) DP loop
     def dp_step(_time: float):
         dt = simulation().getTimeStep()
 
-        # --- Measurements (GNSS with noise) ---
+        # Measurements
         x, y, psi = ship.get_xy_psi()
-        meas_x = x + np.random.normal(0.0, NCFG.sigma_pos)
-        meas_y = y + np.random.normal(0.0, NCFG.sigma_pos)
-        meas_psi = _wrap_pi(psi + np.random.normal(0.0, NCFG.sigma_psi))
+        if getattr(NCFG, "disable_noise", False):
+            x_m, y_m, psi_m = x, y, psi
+        else:
+            x_m   = x   + random.gauss(0.0, getattr(NCFG, "sigma_pos", 0.0))
+            y_m   = y   + random.gauss(0.0, getattr(NCFG, "sigma_pos", 0.0))
+            psi_m = _wrap_pi(psi + random.gauss(0.0, getattr(NCFG, "sigma_psi", 0.0)))
 
-        # --- Reference update (1D along line + heading) ---
-        # Remaining distance along the line:
-        dN = (xB - x); dE = (yB - y)
-        rem = math.cos(phi)*dN + math.sin(phi)*dE
-        rem = max(0.0, rem)  # do not request negative distance
-        pr, vr, rr, psir = ref.step(dt, pd=dist_goal, psi_d=RCFG.psi_d)
+        # Remaining distance along the line
+        dN, dE   = (xB - x), (yB - y)
+        rem_alng = max(0.0, math.cos(phi) * dN + math.sin(phi) * dE)
+        progress = L_path - rem_alng
 
-        # Compose ηr (world) on the line from A toward B:
-        xr = xA + pr*math.cos(phi)
-        yr = yA + pr*math.sin(phi)
-        etar = (xr, yr, psir)
+        # Goal switch
+        if mode["state"] == "TRANSIT" and rem_alng <= goal_tol:
+            mode["state"] = "HOLD"
 
-        # Desired velocities/accelerations in world (straight-line)
-        # Use simple 1D signals mapped to 2D with φ:
-        ur_world, vr_world = (vr*math.cos(phi), vr*math.sin(phi))
-        # Convert to BODY references for controller (so controller eν is in body frame):
-        ur, vr_body = _world_to_body(psi, ur_world, vr_world)
-        # Simple derivative approximations: we just use proportional to vr dynamics for demo
-        udr_world, vdr_world = (0.0, 0.0)  # could be refined
-        rdr = 0.0
-        nudotr = (udr_world, vdr_world, rdr)
-        nur = (ur, vr_body, rr)
+        # Reference update
+        if mode["state"] == "TRANSIT":
+            pr, vr, rr, psir = ref.step(dt, pd=L_path, psi_d=RCFG.psi_d or phi)
+            xr = xA + pr * math.cos(phi)
+            yr = yA + pr * math.sin(phi)
+        else:
+            psi_hold = getattr(RCFG, "psi_hold", RCFG.psi_d or phi)
+            pr, vr, rr, psir = ref.step(dt, pd=L_path, psi_d=psi_hold)
+            xr, yr = xB, yB
 
-        # --- Observer ---
-        # Pass current control guess (last τ used is unknown here; we feed 0 for simplicity)
-        tau_x, tau_y, tau_n = (0.0, 0.0, 0.0)
-        (xh, yh, psih), (uh, vh, rh) = obs.step(dt,
-                                               meas_x, meas_y, meas_psi,
-                                               tau_x, tau_y, tau_n,
-                                               M=M, D=D)
+        # Map ref velocity to body frame
+        ur_world, vr_world = vr * math.cos(phi), vr * math.sin(phi)
+        ur_body, vr_body   = _world_to_body(psi, ur_world, vr_world)
 
-        # --- Controller ---
-        taux, tauy, taun = ctl.step(dt,
-                                    eta_r=etar,
-                                    nu_r=nur,
-                                    nudot_r=nudotr,
-                                    eta_hat=(xh, yh, psih),
-                                    nu_hat=(uh, vh, rh))
+        etar   = (xr, yr, psir)
+        nur    = (ur_body, vr_body, rr)
+        nudotr = (0.0, 0.0, 0.0)
 
-        # --- Allocation ---
+        # Observer
+        (xh, yh, psih), (uh, vh, rh) = obs.step(
+            dt, meas_x=x_m, meas_y=y_m, meas_psi=psi_m,
+            tau_x=0.0, tau_y=0.0, tau_n=0.0,
+            M=M, D=D
+        )
+
+        # Controller 
+        taux, tauy, taun = ctl.step(
+            dt,
+            eta_r=etar, nu_r=nur, nudot_r=nudotr,
+            eta_hat=(xh, yh, psih), nu_hat=(uh, vh, rh)
+        )
+
+        # Allocation
         Fx1, Fy1, Fx2, Fy2 = alloc.allocate(taux, tauy, taun)
-
-        # --- Apply to vessel (per-thruster forces at local positions) ---
         ship.apply_thruster_forces(Fx1, Fy1, Fx2, Fy2)
 
         # HUD
-        sd.setText(1, f"Ref progress: {pr:6.1f}/{dist_goal:.1f} m  |  rem~{rem:5.1f} m")
+        sd.setText(1, f"Mode {mode['state']} | progress {progress:6.1f}/{L_path:.1f} m | rem {rem_alng:5.1f} m")
         sd.setText(2, f"[{Fx1/1000:6.1f}, {Fy1/1000:6.1f}, {Fx2/1000:6.1f}, {Fy2/1000:6.1f}] kN")
         sd.setText(3, f"[{taux/1000:6.1f}, {tauy/1000:6.1f}, {taun/1000:6.1f}]")
 
-    # Register as pre-step (forces applied before integration)
     Sec.preCallback(lambda t: dp_step(t))
 
-    # Focus camera text
+    # Camera framing
+    cam = application().getCameraData()
+    cam.eye    = agx.Vec3(RCFG.start_xy[0] - 30.0, RCFG.start_xy[1] - 80.0, 45.0)
+    cam.center = agx.Vec3(RCFG.start_xy[0], RCFG.start_xy[1], 5.0)
+    cam.up     = agx.Vec3(0.0, 0.0, 1.0)
+    cam.nearClippingPlane = 0.1
+    cam.farClippingPlane  = 5000.0
+    application().applyCameraData(cam)
+
     return

@@ -60,9 +60,9 @@ class TwoThrusterAllocator:
     geom : Geometry2Thrusters
         Geometry description of the two thrusters.
     Tmax : float, optional
-        Per-axis symmetric saturation limit [N]. Default 60_000.0.
+        Per-axis symmetric saturation limit [N]. Default 80_000.0.
     """
-    def __init__(self, geom: Geometry2Thrusters, Tmax=60_000.0):
+    def __init__(self, geom: Geometry2Thrusters, Tmax=80_000.0):
         """
         Initialize allocator and compute the configuration matrix and its pseudo-inverse.
 
@@ -83,7 +83,7 @@ class TwoThrusterAllocator:
         self.T = np.array([
             [1, 0, 1, 0],
             [0, 1, 0, 1],
-            [self.g.ly1, -self.g.lx1, self.g.ly2, -self.g.lx2]
+            [-self.g.ly1, self.g.lx1, -self.g.ly2, self.g.lx2]
         ], dtype=float) # Thruster configuration matrix
         self.Tpinv = self.T.T @ np.linalg.inv(self.T @ self.T.T) # Pseudo-inverse of T
 
