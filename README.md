@@ -1,3 +1,34 @@
+# Dynamic Positioning - Simulation Project
+
+This repository hosts a simulation framework for dynamic vessel positioning based on **AGX Dynamics** and Python.
+
+## Overview
+
+The project is structured to simulate a 3-DOF vessel (surge, sway, and yaw) equipped with thrusters. The framework incorporates several key modules:
+1. **World Creation**: Defines the hydrodynamic environment (e.g., waves, water geometry, etc.).
+2. **Control System**: Implements PID-feedforward controllers for thrust allocation and position error correction.
+3. **Modelling**: Builds vessel geometries and simulates rigid body dynamics.
+4. **Observer**: Provides state estimates incorporating noise and wave removal techniques.
+5. **Runtime Management**: Configures scenes including vessel parameters and logging.
+6. **Visualization**: Includes tools for real-time thruster and position plotting.
+
+## Features
+- Thruster force allocation with pseudo-inverse methods for underactuated systems.
+- Vessel hydrodynamics using AGX's physical simulation APIs.
+- Planar PID controller with integral windup protection and gain scaling adaptation for rough seas.
+- State estimation using a lightweight observer and configurable noise rejection.
+- Automated logging of control efforts, positions with plotting scripts.
+
+---
+
+## Usage and Setup
+
+### Prerequisites
+- **AGX Dynamics** installed (`x64-bit`) - Ensure the compatible version matches Python `3.9.x`.
+- Python/Node dependency management suggests isolation egure configuration Environment Path SystemLEVEL creation.`JSON-scene`\matching```VersionsUpdates.+matplotlib`.uzzer ensure''.PATH-Level Scripts[].Some*PyInitid.*
+
+---
+
 # Dynamic Positioning – AGX + Python Setup (Windows)
 
 This project runs with **AGX Dynamics** and a matching **CPython** version. Follow the steps to get a working environment.
