@@ -54,7 +54,7 @@ class SceneParams:
     ki_x: float = 500.0
     ki_y: float = 500.0
     ki_psi: float = 200.0
-    tau_max: float = 100_000.0
+    tau_max: float = 1_000_000.0
     
     # observer gains
     obs_L_eta: float = 0.5
@@ -65,7 +65,7 @@ class SceneParams:
 class DPRoute:
     # Waypoint pair in world meters (X-east, Y-north convention in AGX plane)
     start_xy: tuple = (0.0, 0.0)
-    goal_xy:  tuple = (80.0,  40.0)   # move diagonally
+    goal_xy:  tuple = (230.0,  230.0)   # move diagonally
     psi_d:    float = 0.0             # desired final heading (rad)
 
 @dataclass

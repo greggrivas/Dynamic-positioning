@@ -21,6 +21,10 @@ class TwoThrusterVessel(agxSDK.Assembly):
                cm_shift_x = -0.2,
                thruster_z_offset = -2.5,
                stern_x_offset = None,
+               thr_port_x=None,
+               thr_port_y=None,
+               thr_star_x=None,
+               thr_star_y=None,
                color = (1.0, 1.0, 0.8, 1.0)):
               
     super().__init__()
@@ -56,8 +60,13 @@ class TwoThrusterVessel(agxSDK.Assembly):
     
     # Thruster local positioning (at stern, port/starboard)
     stern_x = -half_length if stern_x_offset is None else stern_x_offset
-    self.thruster_port_local = agx.Vec3(stern_x, +half_width - side_r, thruster_z_offset)
-    self.thruster_star_local = agx.Vec3(stern_x, -half_width + side_r, thruster_z_offset)
+    if None not in (thr_port_x, thr_port_y, thr_star_x, thr_star_y):
+      self.thruster_port_local = agx.Vec3(thr_port_x, thr_port_y, thruster_z_offset)
+      self.thruster_star_local = agx.Vec3(thr_star_x, thr_star_y, thruster_z_offset)
+    else:
+      side_r = half_height * 1.1
+      self.thruster_port_local = agx.Vec3(stern_x, +half_width - side_r, thruster_z_offset)
+      self.thruster_star_local = agx.Vec3(stern_x, -half_width + side_r, thruster_z_offset)
     
     colorize_body(self.hull, color)
     simulation().add(self)
