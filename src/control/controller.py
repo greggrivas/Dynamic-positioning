@@ -28,10 +28,9 @@ Notes:
 - Integral anti-windup: integrator increments only when control is not saturated.
 - This controller uses diagonal approximations of M and D (vectors of three elements).
 """
-
-import math
 from dataclasses import dataclass
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Optional
+import math
 
 
 @dataclass
@@ -54,16 +53,30 @@ class PIDGains:
         Symmetric scalar saturation limit applied component-wise to each tau output.
         Typical value must be chosen according to thruster capacity (N or Nm).
     """
-    Kp_x: float = 15_000.0  # Proportional gain for surge
-    Kp_y: float = 15_000.0  # Proportional gain for sway
-    Kp_psi: float = 8_000.0  # Proportional gain for yaw
-    Kd_x: float = 25_000.0  # Derivative gain for surge
-    Kd_y: float = 25_000.0  # Derivative gain for sway
-    Kd_psi: float = 12_000.0  # Derivative gain for yaw
-    Ki_x: float = 500.0  # Integral gain for surge
-    Ki_y: float = 500.0  # Integral gain for sway
-    Ki_psi: float = 200.0  # Integral gain for yaw
-    tau_max: float = 80_000.0  # generic scalar saturation (apply to each tau component)
+    Kp_x: float = 15_000.0
+    Kp_y: float = 15_000.0
+    Kp_psi: float = 500_000.0
+    Kd_x: float = 50_000.0
+    Kd_y: float = 50_000.0
+    Kd_psi: float = 2_000_000.0
+    Ki_x: float = 200.0
+    Ki_y: float = 200.0
+    Ki_psi: float = 1_000.0
+    tau_max: float = 150_000.0
+
+
+@dataclass
+class ThrusterGeometry:
+    """
+    Thruster positions in body frame for decoupling calculations.
+    
+    Note: Decoupling is currently disabled due to instability issues.
+    This class is kept for future use with proper allocation-aware decoupling.
+    """
+    lx1: float = -10.0  # Thruster 1 x-position (port)
+    ly1: float = 2.76   # Thruster 1 y-position
+    lx2: float = -10.0  # Thruster 2 x-position (starboard)
+    ly2: float = -2.76  # Thruster 2 y-position
 
 
 class PIDFFController:
@@ -72,7 +85,7 @@ class PIDFFController:
 
     Initialization
     --------------
-    PIDFFController(M_diag, D_diag, gains)
+    PIDFFController(M_diag, D_diag, gains, thruster_geom=None)
 
     Parameters
     ----------
@@ -84,6 +97,8 @@ class PIDFFController:
         tau_ff_component += D_diag[i] * nu_r[i]
     gains : PIDGains
         Gains and saturation limits.
+    thruster_geom : ThrusterGeometry, optional
+        Thruster geometry for potential future decoupling (currently disabled).
 
     Internal state
     --------------
@@ -97,34 +112,41 @@ class PIDFFController:
     - Anti-windup: integrator increments only when the pre-saturated control is within limits.
     """
 
-    def __init__(self, M_diag: Sequence[float], D_diag: Sequence[float], gains: PIDGains):
-        """
-        Construct the controller.
-
-        Parameters
-        ----------
-        M_diag : Sequence[float]
-            Diagonal inertia coefficients [M_x, M_y, M_psi].
-        D_diag : Sequence[float]
-            Diagonal damping coefficients [D_x, D_y, D_psi].
-        gains : PIDGains
-            Controller gains and saturation limit object.
-        """
-        self.M = M_diag  # [m, m, Iz]
-        self.D = D_diag  # [Xu, Yv, Nr]
-        self.g = gains  # PID gains
-        # Integral (sigma) terms for x, y, psi
+    def __init__(self, M_diag: Sequence[float], D_diag: Sequence[float], gains: PIDGains,
+                 thruster_geom: Optional[ThrusterGeometry] = None):
+        self.M = list(M_diag)
+        self.D = list(D_diag)
+        self.g = gains
+        
+        # Integral accumulators
         self.sigma_x = 0.0
         self.sigma_y = 0.0
         self.sigma_psi = 0.0
+        
+        # Store geometry but disable decoupling (caused instability)
+        self.geom = None  # Decoupling disabled
+        self.sway_to_yaw_coupling = 0.0
+        self.yaw_moment_arm = 1.0
 
     @staticmethod
-    def _wrap_pi(a: float) -> float:
-        while a > math.pi:
-            a -= 2 * math.pi
-        while a < -math.pi:
-            a += 2 * math.pi
-        return a
+    def _wrap(angle: float) -> float:
+        """Wrap angle to [-pi, pi]."""
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    @staticmethod
+    def _sat(val: float, limit: float) -> float:
+        """Symmetric saturation."""
+        return max(-limit, min(limit, val))
+
+    def reset(self):
+        """Reset integral accumulators."""
+        self.sigma_x = 0.0
+        self.sigma_y = 0.0
+        self.sigma_psi = 0.0
 
     def step(
         self,
@@ -136,85 +158,95 @@ class PIDFFController:
         nu_hat: Sequence[float],
     ) -> Tuple[float, float, float]:
         """
-        Compute one controller update.
-
+        Compute control forces/torques for one time step.
+        
         Parameters
         ----------
         dt : float
-            Time step (seconds) since last controller call. Used for integrator updates.
+            Time step in seconds.
         eta_r : Sequence[float]
-            Reference/world pose [x_r, y_r, psi_r] (meters, meters, radians).
+            Reference pose [x_r, y_r, psi_r].
         nu_r : Sequence[float]
-            Reference/body velocities [u_r, v_r, r_r] (m/s, m/s, rad/s).
+            Reference body velocities [u_r, v_r, r_r].
         nudot_r : Sequence[float]
-            Reference body accelerations [udot_r, vdot_r, rdot_r] (m/s^2, m/s^2, rad/s^2).
-            Used in feedforward calculation M * nudot_r.
+            Reference body accelerations [udot_r, vdot_r, rdot_r].
         eta_hat : Sequence[float]
-            Estimated/observed pose [x_hat, y_hat, psi_hat].
+            Estimated pose [x, y, psi].
         nu_hat : Sequence[float]
-            Estimated/observed body velocities [u_hat, v_hat, r_hat].
-
+            Estimated body velocities [u, v, r].
+            
         Returns
         -------
-        (tau_x, tau_y, tau_psi) : Tuple[float, float, float]
-            Saturated control outputs for surge, sway and yaw. Units consistent with
-            system (e.g. Newtons for tau_x/y, Newton-meters for tau_psi).
-
-        Algorithm
-        ---------
-        1. Compute position error: ex = x_r - x_hat, ey = y_r - y_hat, epsi = wrap(psi_r - psi_hat)
-        2. Compute velocity error: eu = u_r - u_hat, ev = v_r - v_hat, er = r_r - r_hat
-        3. Compute feedforward: tau_ff = M * nudot_r + D * nu_r (component-wise)
-        4. Compute PD + integral pre-sat: tau = tau_ff + Kp * e_p + Kd * e_v + sigma
-        5. Saturate each tau component to [-tau_max, tau_max]
-        6. Anti-windup: increment integrator only when the pre-sat tau was not clipped.
+        Tuple[float, float, float]
+            Control forces/torques (tau_x, tau_y, tau_psi) in body frame.
         """
+        g = self.g
+        tau_max = g.tau_max
+        
         # Unpack references and estimates
-        xr, yr, psir = eta_r  # Reference pose
-        ur, vr, rr = nu_r  # Reference velocities
-        udr, vdr, rdr = nudot_r  # Reference accelerations (feedforward)
-
-        xh, yh, psih = eta_hat  # Estimated pose
-        uh, vh, rh = nu_hat  # Estimated velocities
-
-        # Position/orientation errors (world frame for x,y; psi wrapped)
-        ex = xr - xh  # Surge position error (m)
-        ey = yr - yh  # Sway position error (m)
-        epsi = self._wrap_pi(psir - psih)  # Yaw error (rad)
-
+        x_r, y_r, psi_r = eta_r
+        u_r, v_r, r_r = nu_r
+        udot_r, vdot_r, rdot_r = nudot_r
+        
+        x_hat, y_hat, psi_hat = eta_hat
+        u_hat, v_hat, r_hat = nu_hat
+        
+        # Position/orientation errors (world frame for x,y; wrapped for psi)
+        e_x = x_r - x_hat
+        e_y = y_r - y_hat
+        e_psi = self._wrap(psi_r - psi_hat)
+        
         # Velocity errors (body frame)
-        eu = ur - uh  # Surge velocity error (m/s)
-        ev = vr - vh  # Sway velocity error (m/s)
-        er = rr - rh  # Yaw-rate error (rad/s)
-
-        # Feedforward from diagonal inertia and damping:
-        tau_ff_x = self.M[0] * udr + self.D[0] * ur
-        tau_ff_y = self.M[1] * vdr + self.D[1] * vr
-        tau_ff_psi = self.M[2] * rdr + self.D[2] * rr
-
-        # PD + integral action
-        tau_x = tau_ff_x + self.g.Kp_x * ex + self.g.Kd_x * eu + self.sigma_x
-        tau_y = tau_ff_y + self.g.Kp_y * ey + self.g.Kd_y * ev + self.sigma_y
-        tau_psi = (
-            tau_ff_psi + self.g.Kp_psi * epsi + self.g.Kd_psi * er + self.sigma_psi
-        )
-
-        # Simple symmetric saturation helper
-        def sat(v: float, lim: float) -> float:
-            return max(-lim, min(lim, v))
-
-        tau_x_s = sat(tau_x, self.g.tau_max)
-        tau_y_s = sat(tau_y, self.g.tau_max)
-        tau_psi_s = sat(tau_psi, self.g.tau_max)
-
-        # Anti-windup: only integrate when the controller output was not limited
-        # (i.e., when pre-sat tau equals saturated tau within numerical tolerance).
-        tol = 1e-9
-        if abs(tau_x_s - tau_x) < tol:
-            self.sigma_x += self.g.Ki_x * ex * dt
-        if abs(tau_y_s - tau_y) < tol:
-            self.sigma_y += self.g.Ki_y * ey * dt
-        if abs(tau_psi_s - tau_psi) < tol:
-            self.sigma_psi += self.g.Ki_psi * epsi * dt
-
-        return tau_x_s, tau_y_s, tau_psi_s
+        e_u = u_r - u_hat
+        e_v = v_r - v_hat
+        e_r = r_r - r_hat
+        
+        # Transform position errors to body frame for surge/sway control
+        c = math.cos(psi_hat)
+        s = math.sin(psi_hat)
+        e_x_body = c * e_x + s * e_y
+        e_y_body = -s * e_x + c * e_y
+        
+        # Feedforward: tau_ff = M * nudot_r + D * nu_r
+        tau_ff_x = self.M[0] * udot_r + self.D[0] * u_r
+        tau_ff_y = self.M[1] * vdot_r + self.D[1] * v_r
+        tau_ff_psi = self.M[2] * rdot_r + self.D[2] * r_r
+        
+        # PID terms
+        # Surge (x)
+        tau_x_unsaturated = (tau_ff_x +
+                             g.Kp_x * e_x_body +
+                             g.Kd_x * e_u +
+                             self.sigma_x)
+        
+        # Sway (y)
+        tau_y_unsaturated = (tau_ff_y +
+                             g.Kp_y * e_y_body +
+                             g.Kd_y * e_v +
+                             self.sigma_y)
+        
+        # Yaw (psi)
+        tau_psi_unsaturated = (tau_ff_psi +
+                               g.Kp_psi * e_psi +
+                               g.Kd_psi * e_r +
+                               self.sigma_psi)
+        
+        # Saturate
+        tau_x = self._sat(tau_x_unsaturated, tau_max)
+        tau_y = self._sat(tau_y_unsaturated, tau_max)
+        tau_psi = self._sat(tau_psi_unsaturated, tau_max * 10)  # Higher limit for yaw moment
+        
+        # Anti-windup: only integrate if not saturated
+        if abs(tau_x_unsaturated) < tau_max:
+            self.sigma_x += g.Ki_x * e_x_body * dt
+            self.sigma_x = self._sat(self.sigma_x, tau_max * 0.5)  # Limit integral term
+        
+        if abs(tau_y_unsaturated) < tau_max:
+            self.sigma_y += g.Ki_y * e_y_body * dt
+            self.sigma_y = self._sat(self.sigma_y, tau_max * 0.5)
+        
+        if abs(tau_psi_unsaturated) < tau_max * 10:
+            self.sigma_psi += g.Ki_psi * e_psi * dt
+            self.sigma_psi = self._sat(self.sigma_psi, tau_max * 5)
+        
+        return tau_x, tau_y, tau_psi

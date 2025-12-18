@@ -1,34 +1,29 @@
 # control/observer.py
-import math
 from dataclasses import dataclass
+import math
 
 @dataclass
 class ObsGains:
     """
-    Observer tuning gains for the SimpleObserver.
-
+    Observer gains for the Luenberger-style observer.
+    
     Attributes
     ----------
     L_eta : float
-        Position-correction gain. Scales how strongly the observer corrects estimated
-        positions (x,y,psi) based on measured pose errors. Units: 1/s (acts like a proportional
-        feedback on position error injected into velocity estimates).
+        Proportional gain for pose correction (x, y, psi).
     L_nu_xy : float
-        Optional separate velocity correction gain for surge/sway (u,v). Not used directly in
-        the current implementation but provided for future extension. Units: 1/s.
+        Proportional gain for velocity correction (u, v).
     L_nu_psi : float
-        Optional yaw-rate correction gain for r. Not used directly in the current implementation
-        but included for symmetry. Units: 1/s.
-
-    Notes
-    -----
-    The present SimpleObserver uses L_eta for both position correction and for leaking position
-    error into the velocity estimates (a simple Luenberger-like structure). The separate L_nu_*
-    fields are retained for clarity and future tuning.
+        Proportional gain for yaw rate correction (r).
+    filter_alpha : float
+        Low-pass filter coefficient for wave rejection (0 < alpha <= 1).
+        Lower values = more filtering (slower response but better noise rejection).
     """
-    L_eta: float = 2.0    # position correction gain
-    L_nu_xy: float = 0.8  # vel gains for x,y
-    L_nu_psi: float = 0.8 # vel gain for yaw
+    L_eta: float = 1.0
+    L_nu_xy: float = 1.0
+    L_nu_psi: float = 1.0
+    filter_alpha: float = 0.1
+
 
 class SimpleObserver:
     """
@@ -43,6 +38,7 @@ class SimpleObserver:
             M * nudot ≈ tau - D * nu  =>  nudot ≈ inv(M) * (tau - D*nu)
       - Uses measured pose to correct both pose and velocities via proportional gains (L gains).
       - Contains a simple angle-wrapping utility for yaw (psi).
+      - Includes low-pass filtering for wave rejection.
 
     Assumptions & Conventions
     -------------------------
@@ -65,58 +61,112 @@ class SimpleObserver:
     - step(dt, meas_x, meas_y, meas_psi, tau_x, tau_y, tau_n, M, D):
         perform one predict-correct iteration and return estimated pose and body velocities.
     """
+    
     def __init__(self, gains: ObsGains):
-        """
-        Initialize the observer state and tuning gains.
-
-        Parameters
-        ----------
-        gains : ObsGains
-            Tuning gains container. Only L_eta is actively used for both pose correction
-            and bleeding position error into velocity estimates in this implementation.
-        """
         self.g = gains
-        self.xhat = 0.0; self.yhat = 0.0; self.psihat = 0.0
-        self.uhat = 0.0; self.vhat = 0.0; self.rhat = 0.0
+        # Estimated states
+        self.eta = [0.0, 0.0, 0.0]  # [x, y, psi]
+        self.nu = [0.0, 0.0, 0.0]   # [u, v, r]
+        # Low-pass filter states for wave rejection
+        self.eta_filt = [0.0, 0.0, 0.0]
+        self.alpha = gains.filter_alpha
 
     @staticmethod
-    def _wrap_pi(a):
-        while a > math.pi:  a -= 2*math.pi
-        while a < -math.pi: a += 2*math.pi
-        return a
+    def _wrap(angle: float) -> float:
+        """Wrap angle to [-pi, pi]."""
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
 
-    def reset(self, x, y, psi):
-        self.xhat = x; self.yhat = y; self.psihat = psi
-        self.uhat = 0.0; self.vhat = 0.0; self.rhat = 0.0
+    def reset(self, x: float, y: float, psi: float):
+        """Initialize observer state."""
+        self.eta = [x, y, psi]
+        self.nu = [0.0, 0.0, 0.0]
+        self.eta_filt = [x, y, psi]
 
-    def step(self, dt, meas_x, meas_y, meas_psi, tau_x, tau_y, tau_n, M, D):
-        # Position prediction from body velocities:
-        # η̇ = R(ψ) ν
-        c = math.cos(self.psihat); s = math.sin(self.psihat)
-        self.xhat += (c*self.uhat - s*self.vhat) * dt
-        self.yhat += (s*self.uhat + c*self.vhat) * dt
-        self.psihat = self._wrap_pi(self.psihat + self.rhat * dt)
-
-        # Position error (in world/NED here)
-        ex = meas_x - self.xhat
-        ey = meas_y - self.yhat
-        epsi = self._wrap_pi(meas_psi - self.psihat)
-
-        # Velocity correction toward forces: M ν̇ ≈ τ - D ν  => ν̇ ≈ M^{-1}(τ - Dν)
-        # Simple diagonal M,D expected
-        invMx = 1.0 / M[0]; invMy = 1.0 / M[1]; invMz = 1.0 / M[2]
-        du = (tau_x - D[0]*self.uhat) * invMx
-        dv = (tau_y - D[1]*self.vhat) * invMy
-        dr = (tau_n - D[2]*self.rhat) * invMz
-
-        # Apply correction using L gains (position error bleeds into velocities)
-        self.uhat += (du + self.g.L_eta*ex) * dt
-        self.vhat += (dv + self.g.L_eta*ey) * dt
-        self.rhat += (dr + self.g.L_eta*epsi) * dt
-
-        # Small direct correction on positions to avoid drift
-        self.xhat += self.g.L_eta * ex * dt
-        self.yhat += self.g.L_eta * ey * dt
-        self.psihat = self._wrap_pi(self.psihat + self.g.L_eta * epsi * dt)
-
-        return (self.xhat, self.yhat, self.psihat), (self.uhat, self.vhat, self.rhat)
+    def step(self, dt: float, meas_x: float, meas_y: float, meas_psi: float,
+             tau_x: float, tau_y: float, tau_n: float,
+             M: list, D: list) -> tuple:
+        """
+        Perform one predict-correct iteration.
+        
+        Parameters
+        ----------
+        dt : float
+            Time step in seconds.
+        meas_x, meas_y, meas_psi : float
+            Measured pose (possibly noisy).
+        tau_x, tau_y, tau_n : float
+            Applied generalized forces/torque in body frame.
+        M : list
+            Diagonal inertia [m_x, m_y, I_z].
+        D : list
+            Diagonal damping [Xu, Yv, Nr].
+            
+        Returns
+        -------
+        tuple
+            (eta_hat, nu_hat) where eta_hat = [x, y, psi] and nu_hat = [u, v, r]
+        """
+        # Low-pass filter measurements for wave rejection
+        self.eta_filt[0] += self.alpha * (meas_x - self.eta_filt[0])
+        self.eta_filt[1] += self.alpha * (meas_y - self.eta_filt[1])
+        self.eta_filt[2] += self.alpha * (self._wrap(meas_psi - self.eta_filt[2]))
+        
+        meas_x_f = self.eta_filt[0]
+        meas_y_f = self.eta_filt[1]
+        meas_psi_f = self._wrap(self.eta_filt[2])
+        
+        # Current estimates
+        x_hat, y_hat, psi_hat = self.eta
+        u_hat, v_hat, r_hat = self.nu
+        
+        # Rotation matrix (body to world)
+        c = math.cos(psi_hat)
+        s = math.sin(psi_hat)
+        
+        # --- PREDICT ---
+        # Pose prediction: eta_dot = R(psi) @ nu
+        x_dot_pred = c * u_hat - s * v_hat
+        y_dot_pred = s * u_hat + c * v_hat
+        psi_dot_pred = r_hat
+        
+        # Velocity prediction: M * nu_dot = tau - D * nu
+        # => nu_dot = inv(M) * (tau - D * nu)
+        u_dot_pred = (tau_x - D[0] * u_hat) / M[0]
+        v_dot_pred = (tau_y - D[1] * v_hat) / M[1]
+        r_dot_pred = (tau_n - D[2] * r_hat) / M[2]
+        
+        # Euler integration for prediction
+        x_pred = x_hat + dt * x_dot_pred
+        y_pred = y_hat + dt * y_dot_pred
+        psi_pred = self._wrap(psi_hat + dt * psi_dot_pred)
+        
+        u_pred = u_hat + dt * u_dot_pred
+        v_pred = v_hat + dt * v_dot_pred
+        r_pred = r_hat + dt * r_dot_pred
+        
+        # --- CORRECT ---
+        # Pose error (using filtered measurements)
+        e_x = meas_x_f - x_pred
+        e_y = meas_y_f - y_pred
+        e_psi = self._wrap(meas_psi_f - psi_pred)
+        
+        # Correct pose
+        self.eta[0] = x_pred + self.g.L_eta * e_x
+        self.eta[1] = y_pred + self.g.L_eta * e_y
+        self.eta[2] = self._wrap(psi_pred + self.g.L_eta * e_psi)
+        
+        # Correct velocities (transform pose error to body frame for velocity correction)
+        c_new = math.cos(self.eta[2])
+        s_new = math.sin(self.eta[2])
+        e_u = c_new * e_x + s_new * e_y
+        e_v = -s_new * e_x + c_new * e_y
+        
+        self.nu[0] = u_pred + self.g.L_nu_xy * e_u / dt if dt > 0 else u_pred
+        self.nu[1] = v_pred + self.g.L_nu_xy * e_v / dt if dt > 0 else v_pred
+        self.nu[2] = r_pred + self.g.L_nu_psi * e_psi / dt if dt > 0 else r_pred
+        
+        return tuple(self.eta), tuple(self.nu)

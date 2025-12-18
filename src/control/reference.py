@@ -39,17 +39,17 @@ def sat(val, vmin, vmax):
 
 @dataclass
 class PosRefParams:
-    omega: float = 0.1      # ω_r,p
-    zeta: float  = 1.2      # ζ_r,p
-    Ki: float    = 0.05     # integral gain for xi_p
-    vmax: float  = 0.3      # m/s cap
+    omega: float = 0.3      # ω_r,p
+    zeta: float  = 1.0      # ζ_r,p
+    Ki: float    = 0.1     # integral gain for xi_p
+    vmax: float  = 2.0      # m/s cap
 
 @dataclass
 class HeadRefParams:
-    omega: float = 0.2
-    zeta: float  = 1.2
+    omega: float = 0.5
+    zeta: float  = 1.0
     Ki: float    = 0.2
-    rmax: float  = 0.2      # rad/s cap
+    rmax: float  = 0.5      # rad/s cap
 
 class ReferenceFilter:
     """
@@ -89,44 +89,62 @@ class ReferenceFilter:
         # position channel internal states
         self.pr = 0.0      # distance (m)
         self.vr = 0.0      # speed along line (m/s)
-        self.xip = 0.0     # integrator
-
         # heading channel internal states
         self.psir = 0.0    # heading reference
         self.rr = 0.0      # yaw rate
-        self.xipsi = 0.0
 
     @staticmethod
     def _wrap_pi(a):
-        while a > math.pi:  a -= 2*math.pi
-        while a < -math.pi: a += 2*math.pi
-        return a
+        return math.atan2(math.sin(a), math.cos(a))
 
     def reset(self, psi_now=0.0):
-        self.pr = 0.0; self.vr = 0.0; self.xip = 0.0
-        self.psir = psi_now; self.rr = 0.0; self.xipsi = 0.0
+        self.pr = 0.0
+        self.vr = 0.0
+        self.psir = psi_now
+        self.rr = 0.0
 
     def step(self, dt, pd, psi_d):
-        # --- Position channel (distance along line) ---
-        # ξ̇p = sat_vmax( Ki (pd - pr) )
-        self.xip += self.pp.Ki * (pd - self.pr) * dt
-        xi_rate = sat(self.xip, -self.pp.vmax, self.pp.vmax)
-
-        # v̇r = ω^2 (ξp - pr) - 2 ζ ω vr
-        self.vr += (self.pp.omega**2 * (xi_rate - self.pr) - 2*self.pp.zeta*self.pp.omega*self.vr) * dt
-        # ṗr = vr
+        # --- Position channel ---
+        # Error to goal
+        ep = pd - self.pr
+        
+        # Desired velocity (limited)
+        vd = sat(self.pp.Ki * ep, -self.pp.vmax, self.pp.vmax)
+        
+        # 2nd-order dynamics: accelerate toward vd
+        # v̈r = ω^2 (vd - vr) - 2ζω v̇r  (simplified as 1st-order on vr toward vd)
+        # Or use full 2nd-order on position:
+        # p̈r = ω^2 (pd - pr) - 2ζω ṗr, with velocity limiting
+        
+        # Compute acceleration
+        ar = self.pp.omega**2 * (pd - self.pr) - 2 * self.pp.zeta * self.pp.omega * self.vr
+        
+        # Update velocity with limit
+        self.vr += ar * dt
+        self.vr = sat(self.vr, -self.pp.vmax, self.pp.vmax)
+        
+        # Update position
         self.pr += self.vr * dt
+        
+        # Clamp pr to not overshoot pd
+        if pd >= 0 and self.pr > pd:
+            self.pr = pd
+            self.vr = 0.0
+        elif pd < 0 and self.pr < pd:
+            self.pr = pd
+            self.vr = 0.0
 
         # --- Heading channel ---
-        # ψ error wrapped
         epsi = self._wrap_pi(psi_d - self.psir)
-        self.xipsi += self.hp.Ki * epsi * dt
-        xi_psi_rate = sat(self.xipsi, -self.hp.rmax, self.hp.rmax)
-
-        # ṙr = ω^2 (ξψ - ψr) - 2 ζ ω rr
-        self.rr += (self.hp.omega**2 * (xi_psi_rate - self.psir) - 2*self.hp.zeta*self.hp.omega*self.rr) * dt
-        # ψ̇r = rr
+        
+        # Compute angular acceleration
+        alpha = self.hp.omega**2 * epsi - 2 * self.hp.zeta * self.hp.omega * self.rr
+        
+        # Update yaw rate with limit
+        self.rr += alpha * dt
+        self.rr = sat(self.rr, -self.hp.rmax, self.hp.rmax)
+        
+        # Update heading
         self.psir = self._wrap_pi(self.psir + self.rr * dt)
 
-        # Return 1D references; conversion to 2D is done by the runner using line angle φ.
         return self.pr, self.vr, self.rr, self.psir

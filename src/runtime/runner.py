@@ -11,7 +11,7 @@ from agx_wrap.world import create_ocean
 from modeling.vessel import TwoThrusterVessel
 from control.reference import ReferenceFilter, PosRefParams, HeadRefParams
 from control.observer import SimpleObserver, ObsGains
-from control.controller import PIDFFController, PIDGains
+from control.controller import PIDFFController, PIDGains, ThrusterGeometry
 from control.allocation import TwoThrusterAllocator, Geometry2Thrusters
 from runtime.config import vessel as VCFG, scene as SCFG, route as RCFG, gnss as NCFG
 
@@ -74,6 +74,15 @@ def build_scene_and_start():
     x0, y0, psi0 = ship.get_xy_psi()
     obs.reset(x0, y0, psi0)
 
+    # Allocator geometry from vessel thruster points
+    lx1, ly1 = float(ship.thruster_port_local.x()), float(ship.thruster_port_local.y())
+    lx2, ly2 = float(ship.thruster_star_local.x()), float(ship.thruster_star_local.y())
+    geom = Geometry2Thrusters(lx1=lx1, ly1=ly1, lx2=lx2, ly2=ly2, biasFy=VCFG.alloc_bias_Fy)
+    alloc = TwoThrusterAllocator(geom, Tmax=VCFG.Tmax_thruster)
+
+    # Thruster geometry for sway-yaw decoupling in controller
+    thr_geom = ThrusterGeometry(lx1=lx1, ly1=ly1, lx2=lx2, ly2=ly2)
+
     M = [VCFG.mass, VCFG.mass, VCFG.Iz]
     D = [VCFG.Xu,   VCFG.Yv,   VCFG.Nr]
     ctl = PIDFFController(
@@ -83,19 +92,16 @@ def build_scene_and_start():
             Kp_y=SCFG.kp_y, Kd_y=SCFG.kd_y, Ki_y=SCFG.ki_y,
             Kp_psi=SCFG.kp_psi, Kd_psi=SCFG.kd_psi, Ki_psi=SCFG.ki_psi,
             tau_max=SCFG.tau_max
-        )
+        ),
+        thruster_geom=thr_geom  # Enable sway-yaw decoupling
     )
-
-    # Allocator geometry from vessel thruster points
-    lx1, ly1 = float(ship.thruster_port_local.x()), float(ship.thruster_port_local.y())
-    lx2, ly2 = float(ship.thruster_star_local.x()), float(ship.thruster_star_local.y())
-    geom = Geometry2Thrusters(lx1=lx1, ly1=ly1, lx2=lx2, ly2=ly2, biasFy=VCFG.alloc_bias_Fy)
-    alloc = TwoThrusterAllocator(geom, Tmax=VCFG.Tmax_thruster)
 
     xA, yA = RCFG.start_xy
     xB, yB = RCFG.goal_xy
     phi    = _angle_of_line(xA, yA, xB, yB)
     L_path = math.hypot(xB - xA, yB - yA)
+    
+    psi_d = RCFG.psi_d if RCFG.psi_d else phi
 
     sd = application().getSceneDecorator()
     sd.setText(1, "DP: progress & remaining to goal")
@@ -128,9 +134,11 @@ def build_scene_and_start():
             mode["state"] = "HOLD"
 
         if mode["state"] == "TRANSIT":
-            pr, vr, rr, psir = ref.step(dt, pd=L_path, psi_d=RCFG.psi_d or phi)
+            pr, vr, rr, psir = ref.step(dt, pd=L_path, psi_d=psi_d)
             xr = xA + pr * math.cos(phi)
             yr = yA + pr * math.sin(phi)
+            if int(t_sim / dt) % 100 == 0:
+                print(f"REF: pr={pr:.2f}/{L_path:.1f} vr={vr:.3f} xr={xr:.1f} yr={yr:.1f}")
         else:
             psi_hold = getattr(RCFG, "psi_hold", RCFG.psi_d or phi)
             pr, vr, rr, psir = ref.step(dt, pd=L_path, psi_d=psi_hold)
