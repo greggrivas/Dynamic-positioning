@@ -61,7 +61,7 @@ class TwoThrusterVessel(agxSDK.Assembly):
     
   def get_world_pose(self):
     T = self.hull.getTransform()
-    return T.getTranslate(), self.hull.getRotation()
+    return T.getTranslate(), self.hull.getRotation() # self.hull.getRotation() could be written as T.getRotation() for consistency
   
   def get_xy_psi(self):
     p, R = self.get_world_pose()

@@ -3,36 +3,45 @@ import math
 from dataclasses import dataclass
 
 """
-Reference generator and 2nd-order tracking filters for position along a line and heading.
+1D 2nd-order tracking filter for distance along a line and heading.
 
-This module provides:
-- PosRefParams, HeadRefParams: simple dataclasses containing nominal filter tuning
-  and limits for the positional and heading reference filters.
-- ReferenceFilter: a paired 2nd-order tracking filter (one for distance along a line,
-  one for heading) that generates smooth references for a vessel guidance / DP controller.
+This class implements two decoupled 2nd-order reference systems:
 
-Conceptual overview
--------------------
-The position channel tracks a scalar "distance along a line" pr using a second-order
-reference model driven by a saturated integrator state ξ_p (xi_p). The heading channel
-is a separate second-order model for ψr (psi reference) with its own integrator ξ_ψ.
+- Position channel: generates a smoothed position reference `pr` along a line
+  and the corresponding velocity `vr`, given a desired distance `pd`. The output
+  velocity is saturated to a maximum allowed value to prevent excessive acceleration.
+  
+- Heading channel: generates a smoothed heading reference `psir` and yaw-rate `rr`
+  given a desired heading `psi_d`. The yaw-rate is limited to a maximum value.
 
-Equations implemented (informal)
-- ξ̇p = Ki_p * (pd - pr)            (integrator; saturated to vmax as a rate limiter)
-- v̇r  = ω_p^2 (ξp - pr) - 2 ζ_p ω_p vr
-- ṗr  = vr
+Constructor
+-----------
+ReferenceFilter(pos_params: PosRefParams, head_params: HeadRefParams)
 
-and for heading
-- ξ̇ψ = Ki_ψ * wrap(ψd - ψr)
-- ṙr = ω_ψ^2 (ξψ - ψr) - 2 ζ_ψ ω_ψ rr
-- ψ̇r = rr
+Methods
+-------
+reset(psi_now: float = 0.0)
+    Resets the internal states (position, velocity, heading, yaw-rate) to zero
+    and sets the heading reference to `psi_now`.
+    
+step(dt: float, pd: float, psi_d: float) -> Tuple[float, float, float, float]
+    Advances the filter by `dt` seconds using the desired distance `pd` and
+    desired heading `psi_d`. Returns smoothed references:
+        - pr : filtered distance along the line (m)
+        - vr : filtered velocity along the line (m/s)
+        - rr : filtered yaw-rate (rad/s)
+        - psir : filtered heading reference (rad)
 
-Usage notes
-- The filter produces scalar references (pr, vr, rr, ψr). The runner must map pr
-  into a 2D target point along a line (using line angle φ) if needed.
-- All angles are radians and wrapped into [-π, π] where appropriate.
+Inputs and units
+----------------
+- pd : desired scalar distance along the line (meters)
+- psi_d : desired heading (radians)
+- dt : time step in seconds
+- pr : smoothed position reference (meters)
+- vr : smoothed velocity reference (m/s)
+- rr : smoothed yaw-rate reference (rad/s)
+- psir : smoothed heading reference (rad)
 """
-
 
 def sat(val, vmin, vmax):
     return max(vmin, min(vmax, val))
@@ -73,11 +82,14 @@ class ReferenceFilter:
         Advance the filter by dt seconds using desired distance pd and desired heading
         psi_d. Returns (pr, vr, rr, psi_r).
 
-    Inputs and units
+    Inputs - Outputs and units
     ----------------
+    Inputs:
     - pd : desired scalar distance (m) along the line (1D command).
     - psi_d : desired heading (rad).
     - dt : time step in seconds.
+    
+    Outputs:
     - pr : produced reference distance in meters.
     - vr : produced reference speed in m/s.
     - rr : produced reference yaw-rate in rad/s.
@@ -146,5 +158,5 @@ class ReferenceFilter:
         
         # Update heading
         self.psir = self._wrap_pi(self.psir + self.rr * dt)
-
+        #return current position(1D)/velocity and yaw-rate/heading references (pr, vr, rr, psir) 
         return self.pr, self.vr, self.rr, self.psir

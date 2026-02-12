@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 logs/
 agx.lic
+src/runtime/dp_log.csv
+.gitignore
+dp_log_plot.png
