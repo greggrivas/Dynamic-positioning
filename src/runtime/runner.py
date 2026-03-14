@@ -8,7 +8,7 @@ from agxPythonModules.utils.environment import simulation, application
 from agxPythonModules.utils.callbacks import StepEventCallback as Sec
 
 from agx_wrap.world import create_ocean
-from modeling.vessel import TwoThrusterVessel
+from modeling.vessel import Ship
 from control.reference import ReferenceFilter, PosRefParams, HeadRefParams
 from control.observer import SimpleObserver, ObsGains
 from control.controller import PIDFFController, PIDGains, ThrusterGeometry
@@ -25,11 +25,7 @@ def _angle_of_line(x0: float, y0: float, x1: float, y1: float) -> float:
     return math.atan2(y1 - y0, x1 - x0)
 
 def _wrap_pi(a: float) -> float:
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
+    return math.atan2(math.sin(a), math.cos(a))
 
 def _world_to_body(psi: float, vx: float, vy: float) -> Tuple[float, float]:
     c, s = math.cos(psi), math.sin(psi)
@@ -38,7 +34,7 @@ def _world_to_body(psi: float, vx: float, vy: float) -> Tuple[float, float]:
 def build_scene_and_start():
     create_ocean(height=SCFG.wave_height)
 
-    ship = TwoThrusterVessel(
+    ship = Ship(
         mass_kg=VCFG.mass,
         half_length=VCFG.half_length,
         half_width=VCFG.half_width,
@@ -144,20 +140,19 @@ def build_scene_and_start():
             pr, vr, rr, psir = ref.step(dt, pd=L_path, psi_d=psi_hold)
             xr, yr = xB, yB
 
-        ur_world, vr_world = vr * math.cos(phi), vr * math.sin(phi)
-        ur_body, vr_body   = _world_to_body(psi, ur_world, vr_world)
-
-        etar   = (xr, yr, psir)
-        nur    = (ur_body, vr_body, rr)
-        nudotr = (0.0, 0.0, 0.0)
-
-        # Observer uses last applied wrench
         (xh, yh, psih), (uh, vh, rh) = obs.step(
             dt,
             meas_x=x_m, meas_y=y_m, meas_psi=psi_m,
             tau_x=last_tau[0], tau_y=last_tau[1], tau_n=last_tau[2],
             M=M, D=D
         )
+
+        ur_world, vr_world = vr * math.cos(phi), vr * math.sin(phi)
+        ur_body, vr_body   = _world_to_body(psih, ur_world, vr_world)
+
+        etar   = (xr, yr, psir)
+        nur    = (ur_body, vr_body, rr)
+        nudotr = (0.0, 0.0, 0.0)
 
         taux, tauy, taun = ctl.step(
             dt,
@@ -168,10 +163,8 @@ def build_scene_and_start():
         Fx1, Fy1, Fx2, Fy2 = alloc.allocate(taux, tauy, taun)
         ship.apply_thruster_forces(Fx1, Fy1, Fx2, Fy2)
 
-        # Effective applied wrench
-        f_vec = np.array([Fx1, Fy1, Fx2, Fy2], dtype=float)
-        tau_eff = alloc.T @ f_vec
-        tau_eff_x, tau_eff_y, tau_eff_n = float(tau_eff[0]), float(tau_eff[1]), float(tau_eff[2])
+        # Store body-frame tau for observer's next step
+        last_tau = (taux, tauy, taun)
 
         if getattr(VCFG, "enable_drag", False):
             du = uh; dv = vh; dr = rh
@@ -189,8 +182,6 @@ def build_scene_and_start():
         ey = yr - yh
         epsi = _wrap_pi(psir - psih)
         _log_writer.writerow([t_sim, xh, yh, psih, xr, yr, psir, ex, ey, epsi, taux, tauy, taun, Fx1, Fy1, Fx2, Fy2])
-
-        last_tau = (tau_eff_x, tau_eff_y, tau_eff_n)
 
     Sec.preCallback(lambda t: dp_step(t))
 

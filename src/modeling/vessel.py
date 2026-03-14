@@ -68,21 +68,26 @@ class Ship(agxSDK.Assembly):
     #ship_body.setMotionControl(agx.RigidBody.STATIC)
     
     self.ship_body.setPosition(agx.Vec3(0, 0, 0))
+    
+    # Mesh-aligment rotation
+    self._mesh_rot = agx.EulerAngles(math.radians(90), 0, math.radians(-90))
+    self._mesh_quat = agx.Quat(self._mesh_rot)
+    self._mesh_quat_inv = self._mesh_quat.inverse()
+    
     # Rotate 90 degrees around X and -90 around Z
-    self.ship_body.setRotation(agx.EulerAngles(math.radians(90), 0, math.radians(-90)))
+    self.ship_body.setRotation(self._mesh_rot)
     self.add(self.ship_body)
     
     #Observer frame for reference
     self.f_observer = agx.ObserverFrame("ship observer", self.ship_body,
                                         agx.AffineMatrix4x4.translate(agx.Vec3(1, 0, 0)))
     #f_ob = simulation().getObserverFrame("ship observer")
-    
     self.add(self.f_observer)
     
     # Set Center of Mass shift by moving the visual geometry relative to the body frame
     self.ship_body.getCmFrame().setLocalTranslate(agx.Vec3(cm_shift_x, 0, 0))
     
-    # Thruster positions in body frame
+    # Thruster positions in ship-logical frame
     self.thruster_port_local = agx.Vec3(thr_port_x, thr_port_y, thruster_z_offset)
     self.thruster_star_local = agx.Vec3(thr_star_x, thr_star_y, thruster_z_offset)
     
@@ -90,8 +95,42 @@ class Ship(agxSDK.Assembly):
     self.hull = self.ship_body
     
     agxOSG.setDiffuseColor(agxOSG.createVisual(self.ship_body, root()), shipColor)
-    print("Ship created | observer frame position: ", self.f_observer.getPosition())
     
+    body_fwd_candidate = agx.Vec3(0, -1, 0)
+    world_fwd_at_rest = self._mesh_quat * body_fwd_candidate
+    print(f"  body_fwd=[0,-1,0] -> world_fwd_at_rest="
+          f"[{world_fwd_at_rest.x():.3f}, {world_fwd_at_rest.y():.3f}, {world_fwd_at_rest.z():.3f}]")
+    
+    # Verify at construction:
+    p0 = self.ship_body.getPosition()
+    p1 = self.f_observer.getPosition()
+    dx = float(p1.x()) - float(p0.x())
+    dy = float(p1.y()) - float(p0.y())
+    psi0 = math.atan2(dy, dx)
+    print(f"Ship created | observer-based heading at rest: psi0={math.degrees(psi0):.1f}°")
+    print(f"  p0=[{p0.x():.3f},{p0.y():.3f},{p0.z():.3f}]")
+    print(f"  p1=[{p1.x():.3f},{p1.y():.3f},{p1.z():.3f}]")
+    print(f"  dx={dx:.3f}, dy={dy:.3f}")
+
+    self.f_bow = agx.ObserverFrame("bow marker", self.ship_body,
+                                       agx.AffineMatrix4x4.translate(agx.Vec3(0, -1, 0)))
+    self.add(self.f_bow)
+
+    p_bow = self.f_bow.getPosition()
+    dx_bow = float(p_bow.x()) - float(p0.x())
+    dy_bow = float(p_bow.y()) - float(p0.y())
+    psi0_bow = math.atan2(dy_bow, dx_bow)
+    print(f"  bow marker: [{p_bow.x():.3f},{p_bow.y():.3f},{p_bow.z():.3f}]")
+    print(f"  bow-based heading: psi0_bow={math.degrees(psi0_bow):.1f}°")
+
+    for label, bv in [("[1,0,0]", agx.Vec3(1,0,0)),
+                          ("[0,1,0]", agx.Vec3(0,1,0)),
+                          ("[0,0,1]", agx.Vec3(0,0,1)),
+                          ("[0,-1,0]", agx.Vec3(0,-1,0)),
+                          ("[-1,0,0]", agx.Vec3(-1,0,0)),
+                          ("[0,0,-1]", agx.Vec3(0,0,-1))]:
+        wv = self._mesh_quat * bv
+        print(f"  mesh_quat * {label} = [{wv.x():.3f}, {wv.y():.3f}, {wv.z():.3f}]")
   def get_ship_observer(self):
     return self.f_observer.getPosition()
   
@@ -100,24 +139,43 @@ class Ship(agxSDK.Assembly):
     return T.getTranslate(), self.ship_body.getRotation()
   
   def get_xy_psi(self):
-    p, R = self.get_world_pose()
+    """
+    Return (x, y, yaw) where yaw is the heading of the ship.
+    Transform the known body-frame forward vector to world frame.
+    """
+    p = self.ship_body.getPosition()
     x, y = float(p.x()), float(p.y())
-    fwd = R * agx.Vec3(1, 0, 0)
-    yaw = math.atan2(float(fwd.y()), float(fwd.x()))
+
+    q = self.ship_body.getRotation()
+    fwd = q * agx.Vec3(1, 0, 0)
+    fx, fy = float(fwd.x()), float(fwd.y())
+
+    raw_yaw = math.atan2(fy, fx)
+    yaw = raw_yaw + math.pi / 2.0
+    yaw = math.atan2(math.sin(yaw), math.cos(yaw))
+    
     return x, y, yaw
-  
+
   def apply_thruster_forces(self, fx1, fy1, fx2, fy2):
     """
     Apply body-frame forces at thruster points in CoM frame.
     """
+    q = self.ship_body.getRotation()
+
+    # Thruster 1 (port) — rotate force body→world
+    f1_world = q * agx.Vec3(fx1, fy1, 0)
+    p1_local = agx.Vec3(float(self.thruster_port_local.x()),
+                         float(self.thruster_port_local.y()),
+                         float(self.thruster_port_local.z()))
+    self.ship_body.addForceAtLocalPosition(f1_world, p1_local)
+
+    # Thruster 2 (starboard)
+    f2_world = q * agx.Vec3(fx2, fy2, 0)
+    p2_local = agx.Vec3(float(self.thruster_star_local.x()),
+                         float(self.thruster_star_local.y()),
+                         float(self.thruster_star_local.z()))
+    self.ship_body.addForceAtLocalPosition(f2_world, p2_local)
     
-    cm_off = self.ship_body.getCmFrame().getLocalTranslate()
-    p1_cm = self.thruster_port_local - cm_off
-    p2_cm = self.thruster_star_local - cm_off
-    
-    self.ship_body.addForceAtLocalCmPosition(agx.Vec3(fx1, fy1, 0.0), p1_cm)
-    self.ship_body.addForceAtLocalCmPosition(agx.Vec3(fx2, fy2, 0.0), p2_cm)
-  
 class surfaceWater():
   def __init__(self, sim, wwc, length, width):
     

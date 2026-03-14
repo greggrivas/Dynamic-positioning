@@ -130,12 +130,8 @@ class PIDFFController:
 
     @staticmethod
     def _wrap(angle: float) -> float:
-        """Wrap angle to [-pi, pi]."""
-        while angle > math.pi:
-            angle -= 2.0 * math.pi
-        while angle < -math.pi:
-            angle += 2.0 * math.pi
-        return angle
+        """Wrap angle to [-pi, pi] using trig identity"""
+        return math.atan2(math.sin(angle), math.cos(angle))
 
     @staticmethod
     def _sat(val: float, limit: float) -> float:
@@ -194,7 +190,7 @@ class PIDFFController:
         # Position/orientation errors (world frame for x,y; wrapped for psi)
         e_x = x_r - x_hat
         e_y = y_r - y_hat
-        e_psi = self._wrap(psi_r - psi_hat)
+        e_psi = math.atan2(math.sin(psi_r - psi_hat), math.cos(psi_r - psi_hat))
         
         # Velocity errors (body frame)
         e_u = u_r - u_hat
@@ -211,6 +207,9 @@ class PIDFFController:
         tau_ff_x = self.M[0] * udot_r + self.D[0] * u_r
         tau_ff_y = self.M[1] * vdot_r + self.D[1] * v_r
         tau_ff_psi = self.M[2] * rdot_r + self.D[2] * r_r
+        
+        # Yaw moment saturation limit
+        tau_psi_max = tau_max * 4.0 
         
         # PID terms
         # Surge (x)
@@ -234,19 +233,29 @@ class PIDFFController:
         # Saturate
         tau_x = self._sat(tau_x_unsaturated, tau_max)
         tau_y = self._sat(tau_y_unsaturated, tau_max)
-        tau_psi = self._sat(tau_psi_unsaturated, tau_max * 10)  # Higher limit for yaw moment
+        tau_psi = self._sat(tau_psi_unsaturated, tau_psi_max)  # Higher limit for yaw moment
         
-        # Anti-windup: only integrate if not saturated
+        # Anti-windup
         if abs(tau_x_unsaturated) < tau_max:
             self.sigma_x += g.Ki_x * e_x_body * dt
-            self.sigma_x = self._sat(self.sigma_x, tau_max * 0.5)  # Limit integral term
+        else:
+            # Back-calculation: decay integral toward zero when saturated
+            self.sigma_x *= (1.0 - 0.1 * dt)
+        self.sigma_x = self._sat(self.sigma_x, tau_max * 0.3)
         
+        # Sway
         if abs(tau_y_unsaturated) < tau_max:
             self.sigma_y += g.Ki_y * e_y_body * dt
-            self.sigma_y = self._sat(self.sigma_y, tau_max * 0.5)
+        else:
+            self.sigma_y *= (1.0 - 0.1 * dt)
+        self.sigma_y = self._sat(self.sigma_y, tau_max * 0.3)
         
-        if abs(tau_psi_unsaturated) < tau_max * 10:
+        # Yaw
+        if abs(tau_psi_unsaturated) < tau_psi_max:
             self.sigma_psi += g.Ki_psi * e_psi * dt
-            self.sigma_psi = self._sat(self.sigma_psi, tau_max * 5)
+        else:
+            # Aggressive back-calculation when yaw is saturated to prevent limit cycling
+            self.sigma_psi *= (1.0 - 0.5 * dt)
+        self.sigma_psi = self._sat(self.sigma_psi, tau_psi_max * 0.2)
         
         return tau_x, tau_y, tau_psi

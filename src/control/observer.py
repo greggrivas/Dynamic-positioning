@@ -73,12 +73,8 @@ class SimpleObserver:
 
     @staticmethod
     def _wrap(angle: float) -> float:
-        """Wrap angle to [-pi, pi]."""
-        while angle > math.pi:
-            angle -= 2.0 * math.pi
-        while angle < -math.pi:
-            angle += 2.0 * math.pi
-        return angle
+        """Wrap angle to [-pi, pi] using trig identity (robust for any magnitude)."""
+        return math.atan2(math.sin(angle), math.cos(angle))
 
     def reset(self, x: float, y: float, psi: float):
         """Initialize observer state."""
@@ -113,7 +109,10 @@ class SimpleObserver:
         # Low-pass filter measurements for wave rejection
         self.eta_filt[0] += self.alpha * (meas_x - self.eta_filt[0])
         self.eta_filt[1] += self.alpha * (meas_y - self.eta_filt[1])
-        self.eta_filt[2] += self.alpha * (self._wrap(meas_psi - self.eta_filt[2]))
+        psi_err_filt = math.atan2(math.sin(meas_psi - self.eta_filt[2]),
+                                   math.cos(meas_psi - self.eta_filt[2]))
+        self.eta_filt[2] += self.alpha * psi_err_filt
+        self.eta_filt[2] = self._wrap(self.eta_filt[2])
         
         meas_x_f = self.eta_filt[0]
         meas_y_f = self.eta_filt[1]
@@ -152,7 +151,8 @@ class SimpleObserver:
         # Pose error (using filtered measurements)
         e_x = meas_x_f - x_pred
         e_y = meas_y_f - y_pred
-        e_psi = self._wrap(meas_psi_f - psi_pred)
+        e_psi = math.atan2(math.sin(meas_psi_f - psi_pred),
+                           math.cos(meas_psi_f - psi_pred))
         
         # Correct pose
         self.eta[0] = x_pred + self.g.L_eta * e_x
